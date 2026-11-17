@@ -1,41 +1,43 @@
-import { watch } from "chokidar";
-import type { Plugin, ViteDevServer } from "vite";
-import { resolveConfig } from "./config.js";
-import { writeRoutes } from "./generator.js";
+import type { Plugin, ResolvedConfig as ViteResolvedConfig, ViteDevServer } from "vite";
+import { loadPluginConfig } from "./config.js";
+import { updateRoutes } from "./generator.js";
 import type { ResolvedConfig, UserConfig } from "./types.js";
+import { watchPages } from "./watch.js";
 
 export interface VitePluginOptions {
-  /** Path to a config file (unused when `userConfig` is provided). */
+  /** Path to a config file, relative to the Vite root. */
   config?: string;
-  /** Inline config, merged over defaults. */
+  /** Inline config, merged over the config file (if any) and the defaults. */
   userConfig?: UserConfig;
 }
 
 /**
- * Vite plugin: generates the routes module on startup and on every change to
- * the pages directory. Import the generated file in your app as usual.
+ * Vite plugin: generates the routes module on startup, and again whenever a
+ * file or directory is added to or removed from the pages directory.
  */
 export function reactFsRouter(options: VitePluginOptions = {}): Plugin {
   let resolved: ResolvedConfig | undefined;
 
   return {
     name: "react-fs-router",
-    configResolved() {
-      resolved = resolveConfig(options.userConfig ?? {}, process.cwd());
-      writeRoutes(resolved);
+    async configResolved(viteConfig: ViteResolvedConfig) {
+      resolved = await loadPluginConfig(options, viteConfig.root);
+      updateRoutes(resolved);
     },
     buildStart() {
-      if (resolved) writeRoutes(resolved);
+      if (resolved) updateRoutes(resolved);
     },
     configureServer(server: ViteDevServer) {
       if (!resolved) return;
       const current = resolved;
-      const regenerate = (): void => {
-        writeRoutes(current);
-        server.ws.send({ type: "full-reload" });
-      };
-      const watcher = watch(current.pages, { ignored: /(^|[\/\\])\../ });
-      watcher.on("add", regenerate).on("change", regenerate).on("unlink", regenerate);
+      const watcher = watchPages(current, () => {
+        try {
+          if (updateRoutes(current)) server.ws.send({ type: "full-reload" });
+        } catch (err) {
+          server.config.logger.error(`[react-fs-router] ${(err as Error).message}`);
+        }
+      });
+      server.httpServer?.once("close", () => void watcher.close());
     },
   };
 }

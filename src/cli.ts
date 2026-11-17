@@ -1,13 +1,12 @@
 #!/usr/bin/env node
 import { Command } from "commander";
-import { watch } from "chokidar";
-import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { loadConfig, resolveConfig } from "./config.js";
-import { writeRoutes } from "./generator.js";
+import { findConfigFile, loadConfig, resolveConfig } from "./config.js";
+import { updateRoutes } from "./generator.js";
 import type { UserConfig } from "./types.js";
+import { watchPages } from "./watch.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json") as { version: string };
@@ -18,25 +17,29 @@ export async function main(argv: string[] = process.argv): Promise<void> {
     .name("rfr")
     .version(pkg.version, "-v, --version", "Output the current version")
     .option("-i, --input <directory>", "Path to the pages directory (overrides config)")
-    .option("-c, --config <file>", "Path to the config file", "rfr.config.ts")
+    .option("-c, --config <file>", "Path to the config file (default: rfr.config.{ts,mts,js,mjs})")
     .option("-o, --output <directory>", "Output directory (overrides config)")
     .option("-a, --adapter <name>", "Routing adapter to use")
     .option("-w, --watch", "Watch for changes and regenerate")
-    .option("-b, --build", "Generate once and exit (default)")
+    .option("-b, --build", "Generate once and exit (default; cannot be combined with --watch)")
     .parse(argv);
 
   const opts = program.opts<{
     input?: string;
-    config: string;
+    config?: string;
     output?: string;
     adapter?: string;
     watch?: boolean;
     build?: boolean;
   }>();
 
-  const userConfig: UserConfig = existsSync(opts.config)
-    ? await loadConfig(opts.config)
-    : {};
+  if (opts.watch && opts.build) {
+    program.error("error: --watch and --build cannot be used together");
+  }
+
+  // An explicitly passed config file must exist; the default ones are optional.
+  const configFile = opts.config ?? findConfigFile(process.cwd());
+  const userConfig: UserConfig = configFile ? await loadConfig(configFile) : {};
 
   const merged: UserConfig = {
     ...userConfig,
@@ -46,20 +49,17 @@ export async function main(argv: string[] = process.argv): Promise<void> {
   };
 
   const config = resolveConfig(merged, process.cwd());
-  writeRoutes(config);
+  updateRoutes(config);
   console.log(`[react-fs-router] Generated ${config.outFile}`);
 
   if (opts.watch) {
-    const watcher = watch(config.pages, { ignored: /(^|[\/\\])\../ });
-    const regenerate = (): void => {
+    watchPages(config, () => {
       try {
-        writeRoutes(config);
-        console.log(`[react-fs-router] Regenerated ${config.outFile}`);
+        if (updateRoutes(config)) console.log(`[react-fs-router] Regenerated ${config.outFile}`);
       } catch (err) {
         console.error("[react-fs-router]", err);
       }
-    };
-    watcher.on("add", regenerate).on("change", regenerate).on("unlink", regenerate);
+    });
   }
 }
 

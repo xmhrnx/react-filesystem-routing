@@ -1,6 +1,6 @@
 {
   "name": "react-fs-router",
-  "version": "2.0.1",
+  "version": "2.1.0",
   "description": "Config-driven, adapter-pluggable file-system routing for React.",
   "type": "module",
   "main": "./dist/index.js",
@@ -42,6 +42,9 @@
   "files": [
     "dist"
   ],
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",

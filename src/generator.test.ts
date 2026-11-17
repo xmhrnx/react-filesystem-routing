@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveConfig } from "./config.js";
 import {
   buildFileRegistry,
@@ -143,8 +143,10 @@ describe("generateRoutesModule", () => {
     expect(source).toContain('"HOME": "/"');
     expect(source).toContain('"ABOUT": "/about"');
     expect(source).toContain('"USERS": "/users"');
-    expect(source).toContain('"USERS_ID": (id) => `/users/${id}`');
-    expect(source).toContain("\"DOCS_SLUG\": (...slug) => `/docs/${slug.join('/')}`");
+    expect(source).toContain('"USERS_ID": (id: string | number) => `/users/${encodeURIComponent(id)}`');
+    expect(source).toContain(
+      "\"DOCS_SLUG\": (...slug: (string | number)[]) => `/docs/${slug.map((s) => encodeURIComponent(s)).join('/')}`",
+    );
   });
 
   it("emits loader imports, route entries and routeObjects", () => {
@@ -247,17 +249,18 @@ describe("generateRoutesModule", () => {
     expect(source).not.toContain('"/account/guard"');
   });
 
-  it("emits a single ROUTES entry when sanitized keys collide", () => {
+  it("keeps every route in ROUTES when sanitized keys collide, suffixing later ones", () => {
     const config = makeConfig();
     writeFileSync(join(dir, "pages", "my-page.tsx"), "export default function A() {}");
     writeFileSync(join(dir, "pages", "my_page.tsx"), "export default function B() {}");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const source = generateRoutesModule(config);
 
-    // Both routes exist, but the ROUTES map contains the sanitized key once.
     expect(source).toContain('path: "/my-page"');
     expect(source).toContain('path: "/my_page"');
-    const keys = source.match(/"MY_PAGE":/g) ?? [];
-    expect(keys).toHaveLength(1);
-    expect(source).toMatch(/"MY_PAGE": "\/my_/);
+    expect(source.match(/"MY_PAGE":/g) ?? []).toHaveLength(1);
+    expect(source.match(/"MY_PAGE_2":/g) ?? []).toHaveLength(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("MY_PAGE_2"));
+    warn.mockRestore();
   });
 });

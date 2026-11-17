@@ -82,9 +82,9 @@ npm install @tanstack/react-router
 That's it. Each router package is an **optional** peer dependency — install
 only the ones you actually use.
 
-> 💡 **Tip:** If you load your config from a `.ts` file, you'll need Node
-> **20.6 or later** (it uses native TypeScript loading). On older Node, write
-> `rfr.config.js` instead.
+> 💡 **Tip:** The CLI needs Node **18+**. Loading a `.ts` config file relies on
+> Node's native TypeScript support (**22.18+ / 23.6+**, or 22.6+ with
+> `--experimental-strip-types`). On older Node, write `rfr.config.js` instead.
 
 ---
 
@@ -103,6 +103,11 @@ export default {
 };
 ```
 
+Pass `config: "rfr.config.js"` to load a config file instead (paths are
+relative to the Vite root); `userConfig` is merged over it. In dev, the routes
+file is regenerated when a page is added, removed or renamed — editing a page
+keeps normal HMR.
+
 ### 📦 Webpack plugin
 
 ```js
@@ -113,6 +118,10 @@ module.exports = {
   plugins: [new ReactFsRouterWebpackPlugin({ userConfig: { pages: "src/pages" } })],
 };
 ```
+
+`config` (relative to webpack's `context`) and `userConfig` work as for Vite.
+Pages are only watched in `webpack --watch` / dev-server mode, so one-off
+builds exit normally.
 
 ### CLI (any toolchain)
 
@@ -125,11 +134,11 @@ Options:
 | Flag | Description |
 | --- | --- |
 | `-i, --input <dir>` | Pages directory (overrides config) |
-| `-c, --config <file>` | Config file path (default `rfr.config.ts`) |
+| `-c, --config <file>` | Config file path (default: first of `rfr.config.ts`, `.mts`, `.js`, `.mjs` that exists) |
 | `-o, --output <dir>` | Output directory (overrides config) |
 | `-a, --adapter <name>` | Routing adapter to use |
-| `-w, --watch` | Watch and regenerate on changes |
-| `-b, --build` | Generate once and exit (default) |
+| `-w, --watch` | Regenerate when pages are added, removed or renamed |
+| `-b, --build` | Generate once and exit (default; can't be combined with `--watch`) |
 
 
 
@@ -262,7 +271,7 @@ import { defineConfig } from "react-fs-router";
 export default defineConfig({
   pages: "src/pages",        // directory to scan 📂
   outDir: "src",             // where to write the generated routes file 📤
-  outFileName: "routes.tsx", // generated file name 📄
+  outFileName: "routes.tsx", // generated file name (must end in .tsx) 📄
   adapter: "react-router",   // "react-router" | "tanstack-router" | "custom" 🔌
 
   // Map file names to wrapper functions. A file whose base name maps to a
@@ -391,20 +400,20 @@ own `index` page and never its descendants.
 
 ## 🔋 Data functions (`loader` / `action`)
 
-Files mapped in `loaders` export a plain **function** (not a component). They
+Files mapped in `loaders` default-export a plain **function** (not a component). They
 are attached to the route's `loader`/`action` and executed by a React Router
 data router. The result is available in the page via `useLoaderData()` /
 `useActionData()` — perfect for data fetching with loading states:
 
 ```ts
-// pages/users/loader.ts
-export async function loader({ params }: { params: { id: string } }) {
+// pages/users/[id]/loader.ts
+export default async function loader({ params }: { params: { id: string } }) {
   return { id: params.id };
 }
 ```
 
 ```tsx
-// pages/users/[id].tsx
+// pages/users/[id]/index.tsx
 import { useLoaderData } from "react-router";
 
 export default function User() {
@@ -554,6 +563,11 @@ import { ROUTES } from "./routes";
 
 <Link to={ROUTES.USERS_ID(14)}>User 14</Link>;
 ```
+
+Arguments are URL-encoded (`ROUTES.USERS_ID("a/b") === "/users/a%2Fb"`). If two
+routes produce the same key (e.g. `my-page.tsx` and `my_page.tsx` both map to
+`MY_PAGE`), the later one gets a numbered suffix (`MY_PAGE_2`) and a warning is
+printed.
 
 Beautiful, type-safe-ish navigation with zero extra tooling. ✨
 

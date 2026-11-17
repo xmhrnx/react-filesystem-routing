@@ -1,43 +1,62 @@
-import { watch } from "chokidar";
-import { resolveConfig } from "./config.js";
-import { writeRoutes } from "./generator.js";
-import type { UserConfig } from "./types.js";
+import type { FSWatcher } from "chokidar";
+import { loadPluginConfig } from "./config.js";
+import { updateRoutes } from "./generator.js";
+import type { ResolvedConfig, UserConfig } from "./types.js";
+import { watchPages } from "./watch.js";
 
 export interface WebpackPluginOptions {
-  /** Path to a config file (unused when `userConfig` is provided). */
+  /** Path to a config file, relative to the webpack `context`. */
   config?: string;
-  /** Inline config, merged over defaults. */
+  /** Inline config, merged over the config file (if any) and the defaults. */
   userConfig?: UserConfig;
 }
 
 interface MinimalCompiler {
+  context?: string;
   hooks: {
-    beforeRun: { tap: (name: string, fn: () => void) => void };
-    watchRun: { tap: (name: string, fn: () => void) => void };
+    beforeRun: { tapPromise: (name: string, fn: () => Promise<void>) => void };
+    watchRun: { tapPromise: (name: string, fn: () => Promise<void>) => void };
     watchClose: { tap: (name: string, fn: () => void) => void };
   };
 }
 
+const PLUGIN_NAME = "ReactFsRouterWebpackPlugin";
+
 /**
- * Webpack plugin: regenerates the routes module before each build/watch run
- * and whenever a page file changes.
+ * Webpack plugin: generates the routes module before each build. In watch
+ * mode it also watches the pages directory, so that adding or removing a page
+ * regenerates the module (which webpack then picks up as a normal change).
+ * One-off builds start no watcher, so the process can exit.
  */
 export class ReactFsRouterWebpackPlugin {
-  private watcher?: ReturnType<typeof watch>;
+  private watcher?: FSWatcher;
+  private config?: Promise<ResolvedConfig>;
 
   constructor(private options: WebpackPluginOptions = {}) {}
 
   apply(compiler: MinimalCompiler): void {
-    const config = resolveConfig(this.options.userConfig ?? {}, process.cwd());
-    const generate = (): void => {
-      writeRoutes(config);
-    };
+    const getConfig = (): Promise<ResolvedConfig> =>
+      (this.config ??= loadPluginConfig(this.options, compiler.context ?? process.cwd()));
 
-    compiler.hooks.beforeRun.tap("ReactFsRouterWebpackPlugin", generate);
-    compiler.hooks.watchRun.tap("ReactFsRouterWebpackPlugin", generate);
-    compiler.hooks.watchClose.tap("ReactFsRouterWebpackPlugin", () => this.watcher?.close());
+    compiler.hooks.beforeRun.tapPromise(PLUGIN_NAME, async () => {
+      updateRoutes(await getConfig());
+    });
 
-    this.watcher = watch(config.pages, { ignored: /(^|[\/\\])\../ });
-    this.watcher.on("add", generate).on("change", generate).on("unlink", generate);
+    compiler.hooks.watchRun.tapPromise(PLUGIN_NAME, async () => {
+      const config = await getConfig();
+      updateRoutes(config);
+      this.watcher ??= watchPages(config, () => {
+        try {
+          updateRoutes(config);
+        } catch (err) {
+          console.error("[react-fs-router]", err);
+        }
+      });
+    });
+
+    compiler.hooks.watchClose.tap(PLUGIN_NAME, () => {
+      void this.watcher?.close();
+      this.watcher = undefined;
+    });
   }
 }

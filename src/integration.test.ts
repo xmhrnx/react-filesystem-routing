@@ -194,31 +194,37 @@ describe("Webpack", () => {
 });
 
 describe("Webpack plugin hooks", () => {
-  it("generates the routes module when the compiler runs", () => {
+  it("generates the routes module when the compiler runs, and only watches in watch mode", async () => {
     const project = createProject();
     const pages = writePages(project);
 
-    const taps: Record<string, Array<() => void>> = { beforeRun: [], watchRun: [], watchClose: [] };
+    const taps: Record<string, Array<() => unknown>> = { beforeRun: [], watchRun: [], watchClose: [] };
     const compiler = {
+      context: project,
       hooks: {
-        beforeRun: { tap: (_name: string, fn: () => void) => taps.beforeRun.push(fn) },
-        watchRun: { tap: (_name: string, fn: () => void) => taps.watchRun.push(fn) },
+        beforeRun: { tapPromise: (_name: string, fn: () => Promise<void>) => taps.beforeRun.push(fn) },
+        watchRun: { tapPromise: (_name: string, fn: () => Promise<void>) => taps.watchRun.push(fn) },
         watchClose: { tap: (_name: string, fn: () => void) => taps.watchClose.push(fn) },
       },
     };
 
     const plugin = new ReactFsRouterWebpackPlugin({ userConfig: { pages, outDir: pages } });
-    plugin.apply(compiler as never);
+    plugin.apply(compiler);
 
     expect(taps.beforeRun).toHaveLength(1);
     expect(taps.watchRun).toHaveLength(1);
     expect(taps.watchClose).toHaveLength(1);
 
-    taps.beforeRun[0]();
+    const internals = plugin as unknown as { watcher?: unknown };
+    await taps.beforeRun[0]();
     expect(existsSync(join(pages, "routes.tsx"))).toBe(true);
+    // A one-off build must not leave a watcher keeping the process alive.
+    expect(internals.watcher).toBeUndefined();
 
-    taps.watchRun[0]();
+    await taps.watchRun[0]();
+    expect(internals.watcher).toBeDefined();
     taps.watchClose[0]();
+    expect(internals.watcher).toBeUndefined();
   });
 });
 

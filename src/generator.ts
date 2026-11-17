@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, normalize, relative } from "node:path";
 import type { ResolvedConfig, RouteMeta, RouteNode } from "./types.js";
 import { scanDirectory } from "./tree.js";
@@ -7,17 +7,46 @@ interface FileRegistry {
   fileToId: Map<string, string>;
 }
 
+/**
+ * Words that cannot be used as a binding name in an ES module (strict mode),
+ * plus `undefined`/`NaN`/`Infinity`/`arguments`/`eval` which are legal-ish but
+ * would shadow globals or be rejected.
+ */
+const RESERVED_WORDS = new Set([
+  "arguments", "await", "break", "case", "catch", "class", "const", "continue",
+  "debugger", "default", "delete", "do", "else", "enum", "eval", "export",
+  "extends", "false", "finally", "for", "function", "if", "implements", "import",
+  "in", "Infinity", "instanceof", "interface", "let", "NaN", "new", "null",
+  "package", "private", "protected", "public", "return", "static", "super",
+  "switch", "this", "throw", "true", "try", "typeof", "undefined", "var", "void",
+  "while", "with", "yield",
+]);
+
+/** Sanitize arbitrary text into a valid, non-reserved JS identifier. */
+export function toSafeIdentifier(text: string): string {
+  const cleaned = text.replace(/[^A-Za-z0-9_$]/g, "_");
+  if (!/^[A-Za-z_$]/.test(cleaned) || RESERVED_WORDS.has(cleaned)) return "_" + cleaned;
+  return cleaned;
+}
+
 /** Convert a file base name into a valid JS identifier. */
 export function toIdentifier(file: string): string {
-  const base = basename(file, extname(file));
-  const cleaned = base.replace(/[^A-Za-z0-9_$]/g, "_");
-  return /^[A-Za-z_$]/.test(cleaned) ? cleaned : "_" + cleaned;
+  return toSafeIdentifier(basename(file, extname(file)));
 }
+
+/** Top-level names declared or imported by the generated routes module. */
+const GENERATED_MODULE_NAMES = [
+  "routes", "routesMeta", "routingMeta", "ignoreIdentifier", "ROUTES", "routeObjects",
+  "routeTree", "Router", "FileSystemRouter", "resolveRoutes", "reactRouterAdapter",
+  "reactRouterDataAdapter", "toRouteObjects", "toDataRouterObjects", "tanstackRouterAdapter",
+  "toTanstackRouteTree", "RouteEntry", "ResolvedRoute", "ReactNode",
+];
 
 /** Assign a unique, readable import identifier to every referenced file. */
 export function buildFileRegistry(tree: RouteNode[]): FileRegistry {
   const fileToId = new Map<string, string>();
-  const used = new Set<string>();
+  // Names the generated module declares or imports itself must not be reused.
+  const used = new Set<string>(GENERATED_MODULE_NAMES);
 
   const register = (file: string): void => {
     if (fileToId.has(file)) return;
@@ -120,11 +149,18 @@ export interface RouteMapEntry {
   /** Param/catch-all names in path order (the function's arguments). */
   params: string[];
   hasCatch: boolean;
+  /**
+   * Set when the natural key was already taken by another route (e.g.
+   * "/my-page" and "/my_page" both sanitize to MY_PAGE): the original key,
+   * while `key` holds the numbered replacement (MY_PAGE_2).
+   */
+  renamedFrom?: string;
 }
 
 /**
  * Collect every addressable route (files and directories that have an index
- * page) into `ROUTES` entries, skipping duplicate keys.
+ * page) into `ROUTES` entries. Routes whose sanitized keys collide get a
+ * numbered suffix (`_2`, `_3`, ...) so that no route is dropped.
  */
 export function routeMapEntries(tree: RouteNode[]): RouteMapEntry[] {
   const entries: RouteMapEntry[] = [];
@@ -136,17 +172,18 @@ export function routeMapEntries(tree: RouteNode[]): RouteMapEntry[] {
         node.type === "file" || (node.type === "directory" && node.component !== null);
       if (addressable) {
         const segments = parseRouteSegments(node.path);
-        const key = routeKeyForSegments(segments);
-        if (!seen.has(key)) {
-          seen.add(key);
-          entries.push({
-            key,
-            path: node.path,
-            segments,
-            params: segments.filter((s) => s.kind !== "literal").map((s) => s.name),
-            hasCatch: segments.some((s) => s.kind === "catch"),
-          });
-        }
+        const baseKey = routeKeyForSegments(segments);
+        let key = baseKey;
+        for (let i = 2; seen.has(key); i++) key = `${baseKey}_${i}`;
+        seen.add(key);
+        entries.push({
+          key,
+          path: node.path,
+          segments,
+          params: segments.filter((s) => s.kind !== "literal").map((s) => s.name),
+          hasCatch: segments.some((s) => s.kind === "catch"),
+          ...(key !== baseKey ? { renamedFrom: baseKey } : {}),
+        });
       }
       visit(node.children);
     }
@@ -156,31 +193,36 @@ export function routeMapEntries(tree: RouteNode[]): RouteMapEntry[] {
   return entries;
 }
 
+/** Escape text for literal inclusion in a JS template literal. */
+function escapeTemplateText(text: string): string {
+  return text.replace(/[\\`]/g, "\\$&").replace(/\$\{/g, "\\${");
+}
+
 function routeMapValueSource(entry: RouteMapEntry): string {
   if (entry.params.length === 0) return JSON.stringify(entry.path);
 
   const used = new Set<string>();
   const uniqueJsName = (name: string): string => {
-    let id = name.replace(/[^A-Za-z0-9_$]/g, "_");
-    if (!/^[A-Za-z_$]/.test(id)) id = "_" + id;
+    let id = toSafeIdentifier(name);
     while (used.has(id)) id += "_";
     used.add(id);
     return id;
   };
 
+  // Param values are URL-encoded so that e.g. "a/b" stays a single segment.
   let template = "/";
   const args: string[] = [];
   for (const segment of entry.segments) {
     if (segment.kind === "literal") {
-      template += segment.name + "/";
+      template += escapeTemplateText(segment.name) + "/";
     } else if (segment.kind === "param") {
       const id = uniqueJsName(segment.name);
-      args.push(id);
-      template += "${" + id + "}/";
+      args.push(`${id}: string | number`);
+      template += "${encodeURIComponent(" + id + ")}/";
     } else {
       const id = uniqueJsName(segment.name);
-      args.push(`...${id}`);
-      template += "${" + id + ".join('/')}";
+      args.push(`...${id}: (string | number)[]`);
+      template += "${" + id + ".map((s) => encodeURIComponent(s)).join('/')}";
     }
   }
   if (template.endsWith("/")) template = template.slice(0, -1);
@@ -283,7 +325,16 @@ export function generateRoutesModule(config: ResolvedConfig): string {
 
   // Navigation map: static paths are constants, dynamic paths are functions
   // that build the URL from their arguments (e.g. ROUTES.USERS_ID(14)).
-  const routesObjectBlock = `export const ROUTES = {\n${routeMapSource(routeMapEntries(tree))}\n} as const;`;
+  const mapEntries = routeMapEntries(tree);
+  for (const entry of mapEntries) {
+    if (entry.renamedFrom) {
+      console.warn(
+        `[react-fs-router] ROUTES key "${entry.renamedFrom}" is used by more than one route; ` +
+          `"${entry.path}" is available as ROUTES.${entry.key}.`,
+      );
+    }
+  }
+  const routesObjectBlock = `export const ROUTES = {\n${routeMapSource(mapEntries)}\n} as const;`;
 
   const inheritLayout = JSON.stringify(config.inheritLayout);
   const reactRouterAdapterName = legacyBrowserRouter ? "reactRouterAdapter" : "reactRouterDataAdapter";
@@ -321,10 +372,21 @@ export function generateRoutesModule(config: ResolvedConfig): string {
   ].join("\n");
 }
 
-/** Generate the routes module and write it to disk. Returns the output file path. */
-export function writeRoutes(config: ResolvedConfig): string {
+/**
+ * Generate the routes module and write it to disk if its content changed.
+ * Returns true when the file was (re)written. Skipping identical writes keeps
+ * file watchers (ours, Vite's, webpack's) from re-triggering on no-op output.
+ */
+export function updateRoutes(config: ResolvedConfig): boolean {
   const source = generateRoutesModule(config);
+  if (existsSync(config.outFile) && readFileSync(config.outFile, "utf8") === source) return false;
   mkdirSync(dirname(config.outFile), { recursive: true });
   writeFileSync(config.outFile, source, "utf8");
+  return true;
+}
+
+/** Generate the routes module and write it to disk. Returns the output file path. */
+export function writeRoutes(config: ResolvedConfig): string {
+  updateRoutes(config);
   return config.outFile;
 }

@@ -58,12 +58,16 @@ function walk(dir: string, basePath: string, config: ResolvedConfig): RouteNode[
     const loaderName = config.fileToLoader(name);
 
     if (functionName === "layout") {
+      assertUnclaimed(node.layout, full, "layout");
       node.layout = full;
     } else if (functionName) {
+      assertUnclaimed(node.functions[functionName], full, `"${functionName}" function`);
       node.functions[functionName] = full;
     } else if (loaderName) {
+      assertUnclaimed(node.loaders[loaderName], full, `"${loaderName}" data function`);
       node.loaders[loaderName] = full;
     } else if (isIndexName(name)) {
+      assertUnclaimed(node.component, full, "index page");
       node.component = full;
     } else {
       node.children.push({
@@ -78,6 +82,8 @@ function walk(dir: string, basePath: string, config: ResolvedConfig): RouteNode[
     }
   }
 
+  assertNoDuplicatePaths(node.children);
+
   if (basePath === "") {
     const rootHasContent =
       node.component !== null ||
@@ -90,4 +96,33 @@ function walk(dir: string, basePath: string, config: ResolvedConfig): RouteNode[
   }
 
   return [node];
+}
+
+function assertUnclaimed(existing: string | null | undefined, file: string, role: string): void {
+  if (existing) {
+    throw new Error(
+      `[react-fs-router] Conflicting ${role} files in the same directory: "${existing}" and "${file}".`,
+    );
+  }
+}
+
+/**
+ * Two siblings must not render a page at the same URL (e.g. `about.tsx` next
+ * to `about/index.tsx`, or `about.tsx` next to `about.jsx`); which one wins
+ * would depend on the router. A directory without an index page may share its
+ * path with a file, since the file then simply acts as that path's page.
+ */
+function assertNoDuplicatePaths(children: RouteNode[]): void {
+  const pages = new Map<string, string>();
+  for (const child of children) {
+    const file = child.component;
+    if (!file) continue;
+    const existing = pages.get(child.path);
+    if (existing) {
+      throw new Error(
+        `[react-fs-router] Conflicting routes for "${child.path}": "${existing}" and "${file}".`,
+      );
+    }
+    pages.set(child.path, file);
+  }
 }
